@@ -21,7 +21,7 @@ const state = {
   ctx: null,
   stream: null,
   activeCamera: 'environment', // 'environment' (back) or 'user' (front)
-  activeResolution: '720p',    // '720p' or '1080p'
+  activeResolution: '720p',    // '720p', '1080p', or '4K'
   videoWidth: 1280,
   videoHeight: 720,
 
@@ -197,16 +197,25 @@ async function setupCamera() {
     state.stream.getTracks().forEach(track => track.stop());
   }
 
-  const is1080 = state.activeResolution === '1080p';
-  console.log(`[Camera] Requesting camera constraints for resolution: ${state.activeResolution} (${is1080 ? '1920x1080' : '1280x720'})`);
+  let idealW = 1280;
+  let idealH = 720;
+  if (state.activeResolution === '1080p') {
+    idealW = 1920;
+    idealH = 1080;
+  } else if (state.activeResolution === '4K') {
+    idealW = 3840;
+    idealH = 2160;
+  }
+
+  console.log(`[Camera] Requesting camera constraints for resolution: ${state.activeResolution} (${idealW}x${idealH})`);
 
   // Mobile camera constraints
   const constraints = {
     audio: true, // Captures court sounds/screams for high quality videos!
     video: {
       facingMode: state.activeCamera === 'environment' ? 'environment' : 'user',
-      width: { ideal: is1080 ? 1920 : 1280 },
-      height: { ideal: is1080 ? 1080 : 720 },
+      width: { ideal: idealW },
+      height: { ideal: idealH },
       frameRate: { ideal: 30 }
     }
   };
@@ -411,9 +420,15 @@ async function processFrame(timestamp) {
     }
   }
 
+  // Determine dynamic confidence thresholds based on wide-lens/high-resolution setting
+  // Wide lenses show smaller objects on high resolutions, so we need lower thresholds to maintain locks.
+  const isHighResWide = state.activeResolution === '1080p' || state.activeResolution === '4K';
+  const ballThreshold = isHighResWide ? 0.15 : 0.25;
+  const personThreshold = isHighResWide ? 0.25 : 0.35;
+
   // Filter for sports ball and players
-  const ballDetections = detections.filter(d => d.class === 'sports ball' && d.score >= 0.25);
-  const playerDetections = detections.filter(d => d.class === 'person' && d.score >= 0.35);
+  const ballDetections = detections.filter(d => d.class === 'sports ball' && d.score >= ballThreshold);
+  const playerDetections = detections.filter(d => d.class === 'person' && d.score >= personThreshold);
   
   if (detections.length > 0) {
     DOM.targetCounter().textContent = ballDetections.length + playerDetections.length;
@@ -540,6 +555,10 @@ async function processFrame(timestamp) {
   let targetW = state.videoWidth;
 
   const mode = state.viewport.mode;
+
+  // Dynamic zoom out factor during airborne passes (scales with active maxZoom)
+  // For wide lenses with high zoom settings, we pan out smoothly during airborne passes.
+  const airZoomFactor = 1.0 + (state.viewport.maxZoom - 1.0) * 0.2;
   
   if (mode === 'ball' && activeBall) {
     // Pan strictly around ball
@@ -578,8 +597,8 @@ async function processFrame(timestamp) {
       targetX = activeBall.x;
       targetY = activeBall.y;
       
-      // Dynamic zoom out: set viewport to 1.25x zoom for cinematic court capture
-      targetW = state.videoWidth / 1.25;
+      // Dynamic zoom out based on active zoom profile for cinematic court capture
+      targetW = state.videoWidth / airZoomFactor;
       
       // Frame the pass: bias center slightly towards the pass origin (last holder) so both are in frame
       if (state.possession.lastHolder && (Date.now() - state.possession.lastHolder.timestamp < 1500)) {
@@ -630,14 +649,14 @@ async function processFrame(timestamp) {
         
         // If ball is in the air, force a wider crop to capture pass dynamics
         if (state.possession.isBallInAir) {
-          targetW = Math.max((maxX - minX) * 1.5, state.videoWidth / 1.25);
+          targetW = Math.max((maxX - minX) * 1.5, state.videoWidth / airZoomFactor);
         } else {
           targetW = Math.max((maxX - minX) * 1.5, minW);
         }
       } else {
         // Just ball, zoom in or out based on air status
         if (state.possession.isBallInAir) {
-          targetW = state.videoWidth / 1.25;
+          targetW = state.videoWidth / airZoomFactor;
         } else {
           targetW = state.videoWidth / state.viewport.maxZoom;
         }
