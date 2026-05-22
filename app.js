@@ -426,9 +426,43 @@ async function processFrame(timestamp) {
   const ballThreshold = isHighResWide ? 0.15 : 0.25;
   const personThreshold = isHighResWide ? 0.25 : 0.35;
 
-  // Filter for sports ball and players
-  const ballDetections = detections.filter(d => d.class === 'sports ball' && d.score >= ballThreshold);
+  // 1.5 Run lightweight custom offline circular shape detector (fallback / parallel channel)
+  let circularBlobs = [];
+  try {
+    circularBlobs = detectCircularShapes(state.videoEl, state.videoWidth, state.videoHeight);
+  } catch (err) {
+    console.warn('[Vision Loop] Circular shape detector failed', err);
+  }
+
+  // Filter for players
   const playerDetections = detections.filter(d => d.class === 'person' && d.score >= personThreshold);
+
+  // Filter for sports balls (also treat circular misclassifications like frisbee/orange/apple as sports balls)
+  const roundClasses = ['sports ball', 'frisbee', 'orange', 'apple'];
+  const cocoBallDetections = detections.filter(d => roundClasses.includes(d.class) && d.score >= ballThreshold);
+  
+  // Normalize COCO classes to 'sports ball'
+  cocoBallDetections.forEach(d => d.class = 'sports ball');
+
+  // Merge COCO detections and custom pixel circular detections (avoid duplicates using spatial overlap check)
+  const ballDetections = [...cocoBallDetections];
+  
+  circularBlobs.forEach(blob => {
+    const bx = blob.bbox[0] + blob.bbox[2]/2;
+    const by = blob.bbox[1] + blob.bbox[3]/2;
+    
+    const hasOverlap = cocoBallDetections.some(coco => {
+      const cx = coco.bbox[0];
+      const cy = coco.bbox[1];
+      const cw = coco.bbox[2];
+      const ch = coco.bbox[3];
+      return bx >= cx && bx <= cx + cw && by >= cy && by <= cy + ch;
+    });
+    
+    if (!hasOverlap) {
+      ballDetections.push(blob);
+    }
+  });
   
   if (detections.length > 0) {
     DOM.targetCounter().textContent = ballDetections.length + playerDetections.length;
@@ -824,6 +858,146 @@ function drawCornerBrackets(ctx, x, y, w, h, len, color) {
   ctx.beginPath();
   ctx.moveTo(x + w - len, y + h); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w, y + h - len);
   ctx.stroke();
+}
+
+// Lightweight custom offline circular shape detector (Computer Vision Fallback)
+function detectCircularShapes(videoEl, videoW, videoH) {
+  if (!state.offscreenCanvas) {
+    state.offscreenCanvas = document.createElement('canvas');
+    state.offscreenCanvas.width = 160;
+    state.offscreenCanvas.height = 90;
+    state.offscreenCtx = state.offscreenCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  
+  const canvas = state.offscreenCanvas;
+  const ctx = state.offscreenCtx;
+  const sw = canvas.width;
+  const sh = canvas.height;
+  
+  ctx.drawImage(videoEl, 0, 0, sw, sh);
+  let imgData;
+  try {
+    imgData = ctx.getImageData(0, 0, sw, sh);
+  } catch (e) {
+    return []; // Canvas or stream not fully ready
+  }
+  
+  const data = imgData.data;
+  const grayscale = new Float32Array(sw * sh);
+  
+  // 1. Convert to Grayscale
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i+1];
+    const b = data[i+2];
+    grayscale[i/4] = 0.299 * r + 0.587 * g + 0.114 * b;
+  }
+  
+  // 2. Simple Sobel gradient magnitude for fast edge detection
+  const edges = new Uint8Array(sw * sh);
+  const threshold = 35; // Edge strength sensitivity
+  
+  for (let y = 1; y < sh - 1; y++) {
+    for (let x = 1; x < sw - 1; x++) {
+      const idx = y * sw + x;
+      const gx = grayscale[idx + 1] - grayscale[idx - 1];
+      const gy = grayscale[idx + sw] - grayscale[idx - sw];
+      const mag = Math.hypot(gx, gy);
+      edges[idx] = mag > threshold ? 255 : 0;
+    }
+  }
+  
+  // 3. Fast Connected Components BFS to find circular contours
+  const visited = new Uint8Array(sw * sh);
+  const blobs = [];
+  
+  for (let y = 2; y < sh - 2; y++) {
+    for (let x = 2; x < sw - 2; x++) {
+      const idx = y * sw + x;
+      if (edges[idx] && !visited[idx]) {
+        const queue = [idx];
+        visited[idx] = 1;
+        const pixels = [];
+        let head = 0;
+        
+        while (head < queue.length) {
+          const curr = queue[head++];
+          const cx = curr % sw;
+          const cy = Math.floor(curr / sw);
+          pixels.push({ x: cx, y: cy });
+          
+          const neighbors = [curr - 1, curr + 1, curr - sw, curr + sw];
+          for (let n of neighbors) {
+            if (n >= 0 && n < sw * sh && edges[n] && !visited[n]) {
+              visited[n] = 1;
+              queue.push(n);
+            }
+          }
+          if (queue.length > 250) break; // Limit size to filter out large court lines/backgrounds
+        }
+        
+        // Basketball/sports balls will be medium-sized blobs in our 160x90 thumbnail
+        if (pixels.length >= 10 && pixels.length <= 120) {
+          let minX = sw, maxX = 0, minY = sh, maxY = 0;
+          let sumX = 0, sumY = 0;
+          
+          for (let p of pixels) {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+            sumX += p.x;
+            sumY += p.y;
+          }
+          
+          const centerX = sumX / pixels.length;
+          const centerY = sumY / pixels.length;
+          const bw = maxX - minX + 1;
+          const bh = maxY - minY + 1;
+          const aspect = bw / bh;
+          
+          // Ball must be relatively compact (aspect ratio close to 1.0)
+          if (aspect >= 0.75 && aspect <= 1.35 && bw >= 4 && bh >= 4) {
+            // Circularity check: variance of boundary pixels' distances to centroid
+            let totalDist = 0;
+            const distances = [];
+            for (let p of pixels) {
+              const d = Math.hypot(p.x - centerX, p.y - centerY);
+              distances.push(d);
+              totalDist += d;
+            }
+            
+            const avgDist = totalDist / pixels.length;
+            let variance = 0;
+            for (let d of distances) {
+              variance += Math.pow(d - avgDist, 2);
+            }
+            const stdDev = Math.sqrt(variance / pixels.length);
+            const circularityScore = stdDev / avgDist;
+            
+            // Low radius variance (stdDev/mean) indicates a clean circle or sphere!
+            if (circularityScore < 0.25) {
+              const scaleX = videoW / sw;
+              const scaleY = videoH / sh;
+              
+              blobs.push({
+                bbox: [
+                  minX * scaleX,
+                  minY * scaleY,
+                  bw * scaleX,
+                  bh * scaleY
+                ],
+                class: 'sports ball',
+                score: parseFloat((0.90 * (1.0 - circularityScore)).toFixed(2))
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  return blobs;
 }
 
 // 8. HIGH QUALITY ON-DEVICE VIDEO RECORDER
