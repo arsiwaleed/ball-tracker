@@ -496,34 +496,109 @@ async function processFrame(timestamp) {
   let activeBall = null;
   
   if (ballDetections.length > 0) {
-    // Pick the most confident ball detection
-    const ball = ballDetections.sort((a, b) => b.score - a.score)[0];
-    const bx = ball.bbox[0] + ball.bbox[2]/2;
-    const by = ball.bbox[1] + ball.bbox[3]/2;
+    // Rank candidates using stateful temporal and spatial weights
+    const rankedBalls = ballDetections.map(d => {
+      const cx = d.bbox[0] + d.bbox[2] / 2;
+      const cy = d.bbox[1] + d.bbox[3] / 2;
+      
+      let rankingScore = d.score; // Base confidence score (e.g. 0.15 to 0.98)
+      
+      // A. Proximity to Players (especially in-hand possession)
+      let minDistToPlayer = Infinity;
+      let insidePlayer = false;
+      
+      playerDetections.forEach(p => {
+        const px = p.bbox[0];
+        const py = p.bbox[1];
+        const pw = p.bbox[2];
+        const ph = p.bbox[3];
+        
+        const pCenterX = px + pw / 2;
+        const pCenterY = py + ph / 2;
+        const dist = Math.hypot(cx - pCenterX, cy - pCenterY);
+        
+        if (dist < minDistToPlayer) {
+          minDistToPlayer = dist;
+        }
+        
+        // Check if candidate center lies inside player bbox (with 15% / 10% horizontal/vertical padding)
+        const padW = pw * 0.15;
+        const padH = ph * 0.10;
+        if (cx >= px - padW && cx <= px + pw + padW &&
+            cy >= py - padH && cy <= py + ph + padH) {
+          insidePlayer = true;
+        }
+      });
+      
+      // Apply player proximity weights
+      if (insidePlayer) {
+        rankingScore += 2.0; // Strongest preference for hand-held / body-adjacent objects
+      } else if (minDistToPlayer < 400) {
+        rankingScore += 1.5 * (1.0 - minDistToPlayer / 400); // Preference for near-player objects
+      }
+      
+      // B. Temporal Trajectory Gating
+      if (state.ballTracker.lastX !== null) {
+        const predX = state.ballTracker.lastX + state.ballTracker.vx;
+        const predY = state.ballTracker.lastY + state.ballTracker.vy;
+        const distToPred = Math.hypot(cx - predX, cy - predY);
+        
+        if (distToPred < 250) {
+          // Massive boost for matching the predicted trajectory of the active ball
+          rankingScore += 3.0 * (1.0 - distToPred / 250);
+        } else {
+          // Heavy penalty for candidates far from predicted trajectory (gating out distractors)
+          rankingScore -= 2.0;
+        }
+      }
+      
+      // C. Cantaloupe Color Match preference
+      if (d.isCantaloupe) {
+        rankingScore += 0.5;
+      }
+      
+      return { detection: d, rank: rankingScore };
+    });
     
-    // Compute current velocity (speed of pass or bounce!)
-    if (state.ballTracker.lastX !== null) {
-      state.ballTracker.vx = bx - state.ballTracker.lastX;
-      state.ballTracker.vy = by - state.ballTracker.lastY;
+    // Select the candidate with the highest stateful ranking score
+    const bestCandidate = rankedBalls.sort((a, b) => b.rank - a.rank)[0];
+    const ball = bestCandidate ? bestCandidate.detection : null;
+    
+    if (ball) {
+      const bx = ball.bbox[0] + ball.bbox[2]/2;
+      const by = ball.bbox[1] + ball.bbox[3]/2;
+      
+      // Compute current velocity (speed of pass or bounce!)
+      if (state.ballTracker.lastX !== null) {
+        state.ballTracker.vx = bx - state.ballTracker.lastX;
+        state.ballTracker.vy = by - state.ballTracker.lastY;
+      } else {
+        state.ballTracker.vx = 0;
+        state.ballTracker.vy = 0;
+      }
+
+      state.ballTracker.lastX = bx;
+      state.ballTracker.lastY = by;
+      state.ballTracker.lostFrames = 0;
+      state.ballTracker.isCantaloupe = !!ball.isCantaloupe;
+      
+      activeBall = { 
+        x: bx, 
+        y: by, 
+        w: ball.bbox[2], 
+        h: ball.bbox[3], 
+        score: ball.score, 
+        prediction: false,
+        isCantaloupe: !!ball.isCantaloupe
+      };
     } else {
+      // Fallback: clear tracker if best ranked candidate is somehow null
+      state.ballTracker.lastX = null;
+      state.ballTracker.lastY = null;
       state.ballTracker.vx = 0;
       state.ballTracker.vy = 0;
+      state.ballTracker.isCantaloupe = false;
     }
-
-    state.ballTracker.lastX = bx;
-    state.ballTracker.lastY = by;
-    state.ballTracker.lostFrames = 0;
-    state.ballTracker.isCantaloupe = !!ball.isCantaloupe;
-    
-    activeBall = { 
-      x: bx, 
-      y: by, 
-      w: ball.bbox[2], 
-      h: ball.bbox[3], 
-      score: ball.score, 
-      prediction: false,
-      isCantaloupe: !!ball.isCantaloupe
-    };
   } else {
     // If ball is lost, trigger ball memory prediction
     if (state.ballTracker.lastX !== null && state.ballTracker.lostFrames < state.ballTracker.maxMemoryFrames) {
