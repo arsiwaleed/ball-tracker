@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Antigravity Sports Ball Tracker</title>
+  
+  <!-- SEO & PWA Meta Tags -->
+  <meta name="description" content="AI-powered real-time sports ball and player tracking. Create smooth, virtually panned sports videos client-side.">
+  <meta name="theme-color" content="#0d0f14">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Ball Tracker">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="manifest" href="manifest.json">
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="index.css">
+  
+  <!-- TensorFlow.js and COCO-SSD Model -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js" defer></script>
+  
+  <script src="app.js" defer></script>
+</head>
+<body>
+
+  <!-- Hidden HTML5 Video element for camera stream -->
+  <video id="rawVideo" autoplay playsinline muted></video>
+
+  <!-- Full-screen Canvas for Virtual Camera Output -->
+  <main id="appContainer">
+    <canvas id="virtualCanvas"></canvas>
+    
+    <!-- Top Telemetry Status HUD -->
+    <header class="hud-header">
+      <div class="logo-area">
+        <div class="logo-dot pulse-gold"></div>
+        <h1>ANTIGRAVITY <span class="accent-text">TRACKER</span></h1>
+      </div>
+      
+      <div class="telemetry-bar">
+        <div class="telemetry-item" id="aiStatus">
+          <span class="label">AI Engine:</span>
+          <span class="value state-loading">INITIALIZING...</span>
+        </div>
+        <div class="telemetry-item">
+          <span class="label">FPS:</span>
+          <span class="value" id="fpsCounter">0</span>
+        </div>
+        <div class="telemetry-item hidden-mobile">
+          <span class="label">Targets:</span>
+          <span class="value" id="targetCounter">0</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Side Fast-Access Action Panel -->
+    <div class="hud-side-panel">
+      <!-- Camera Toggle -->
+      <button class="icon-button" id="flipCameraBtn" aria-label="Flip Camera" title="Flip Camera">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 4v6h-6M3 20v-6h6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L3 8m18 8l-2.64 2.36A9 9 0 0 1 3.51 15"/></svg>
+      </button>
+
+      <!-- Debug Boxes Toggle -->
+      <button class="icon-button active" id="toggleDebugBtn" aria-label="Toggle AI Overlay" title="Toggle AI Overlay">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+
+      <!-- Stream Helper Toggle -->
+      <button class="icon-button" id="streamInfoBtn" aria-label="Stream Help" title="Streaming Guide">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 17H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-1"/><polygon points="12 7 17 12 12 17 12 7"/></svg>
+      </button>
+    </div>
+
+    <!-- Center Bottom Main Controls -->
+    <div class="hud-bottom-bar">
+      <!-- Settings Panel Toggle -->
+      <button class="control-btn" id="openSettingsBtn" aria-label="Settings">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="cog-icon"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>TUNING</span>
+      </button>
+
+      <!-- Pulse Record Button -->
+      <div class="record-container">
+        <button id="recordBtn" class="record-btn" aria-label="Record Video">
+          <div class="record-icon-inner"></div>
+        </button>
+        <span class="record-timer" id="recordTimer">00:00</span>
+      </div>
+
+      <!-- Eco Mode / Inference rate Toggle -->
+      <button class="control-btn" id="toggleEcoBtn" aria-label="Toggle Battery Saver">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+        <span>BATTERY</span>
+      </button>
+    </div>
+
+    <!-- Bottom Settings Drawer (Glassmorphic) -->
+    <div class="settings-drawer" id="settingsDrawer">
+      <div class="drawer-header">
+        <h2>Smart Camera Tuning</h2>
+        <button class="close-btn" id="closeSettingsBtn" aria-label="Close Settings">&times;</button>
+      </div>
+      
+      <div class="drawer-content">
+        <div class="control-group">
+          <label for="cameraSelector">Active Input Device</label>
+          <div class="custom-select">
+            <select id="cameraSelector">
+              <option value="environment">Back Camera (Main Lens)</option>
+              <option value="user">Front Camera (Selfie)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label>Tracking Profile</label>
+          <div class="toggle-segmented">
+            <input type="radio" id="modeCombined" name="trackingMode" value="combined" checked>
+            <label for="modeCombined">Combined (Smart)</label>
+
+            <input type="radio" id="modeBall" name="trackingMode" value="ball">
+            <label for="modeBall">Ball Centered</label>
+
+            <input type="radio" id="modePlayers" name="trackingMode" value="players">
+            <label for="modePlayers">Players Only</label>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <div class="slider-header">
+            <span>Cinematic Smoothness (Lerp)</span>
+            <span class="slider-val" id="smoothnessVal">0.05</span>
+          </div>
+          <input type="range" id="smoothnessSlider" min="0.01" max="0.2" step="0.01" value="0.05">
+          <span class="slider-caption">Lower values create smoother, cinematic pans. Higher values track faster.</span>
+        </div>
+
+        <div class="control-group">
+          <div class="slider-header">
+            <span>Maximum Dynamic Zoom</span>
+            <span class="slider-val" id="zoomVal">2.2x</span>
+          </div>
+          <input type="range" id="zoomSlider" min="1.0" max="3.0" step="0.1" value="2.2">
+          <span class="slider-caption">Limits how closely the virtual camera crops in on active plays.</span>
+        </div>
+
+        <div class="control-group">
+          <div class="slider-header">
+            <span>Inference Throttle (Performance)</span>
+            <span class="slider-val" id="throttleVal">1 (Max Performance)</span>
+          </div>
+          <input type="range" id="throttleSlider" min="1" max="5" step="1" value="1">
+          <span class="slider-caption">Increases frames skipped between AI detections to save battery/thermal limits.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Streaming Info & OBS Overlay Modal (Glassmorphic) -->
+    <div class="info-modal" id="streamModal">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2>Stream & Output Settings</h2>
+          <button class="close-btn" id="closeStreamBtn">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p>You can use the virtually panned camera output in several high-performance ways:</p>
+          
+          <div class="feature-card">
+            <h3>1. Recording High-Quality Clamps</h3>
+            <p>Tap the red circle button at the bottom center to record the canvas stream live to your phone. We record the fully tracked frame in standard WebM/MP4 format which download instantly when you stop!</p>
+          </div>
+
+          <div class="feature-card">
+            <h3>2. Cast to OBS Studio / Live Stream</h3>
+            <p>To use this as a live panning camera source for OBS or YouTube/Twitch streams:</p>
+            <ol>
+              <li>Open this app on a phone connected to the same local Wi-Fi.</li>
+              <li>Toggle off the bounding boxes to keep the stream clean.</li>
+              <li>Share the phone screen using AirPlay/Chromecast, or load this page inside OBS using a WebRTC broadcast link.</li>
+              <li><strong>Recommended:</strong> Connect this canvas output directly to <strong>VDO.ninja</strong> or <strong>OBS.Ninja</strong> as an instant browser capture source.</li>
+            </ol>
+          </div>
+
+          <div class="feature-card">
+            <h3>3. PWA (Mobile Native Mode)</h3>
+            <p>Tap your browser's share icon (iOS Safari) or menu icon (Android Chrome) and select <strong>"Add to Home Screen"</strong>. This launches the application in an immersive, full-screen standalone mode without URL bars, mimicking a native mobile camera app.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- UI Notification Toasts -->
+    <div id="toastContainer"></div>
+  </main>
+</body>
+</html>

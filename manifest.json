@@ -1,0 +1,22 @@
+{
+  "name": "Antigravity Sports Ball Tracker",
+  "short_name": "BallTracker",
+  "description": "Real-time AI-powered sports ball and player tracking virtual panning camera.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0d0f14",
+  "theme_color": "#ff7b00",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ]
+}
