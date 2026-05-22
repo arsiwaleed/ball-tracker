@@ -451,16 +451,26 @@ async function processFrame(timestamp) {
     const bx = blob.bbox[0] + blob.bbox[2]/2;
     const by = blob.bbox[1] + blob.bbox[3]/2;
     
-    const hasOverlap = cocoBallDetections.some(coco => {
+    let overlapIdx = -1;
+    const hasOverlap = cocoBallDetections.some((coco, idx) => {
       const cx = coco.bbox[0];
       const cy = coco.bbox[1];
       const cw = coco.bbox[2];
       const ch = coco.bbox[3];
-      return bx >= cx && bx <= cx + cw && by >= cy && by <= cy + ch;
+      const isOverlap = bx >= cx && bx <= cx + cw && by >= cy && by <= cy + ch;
+      if (isOverlap) {
+        overlapIdx = idx;
+      }
+      return isOverlap;
     });
     
     if (!hasOverlap) {
       ballDetections.push(blob);
+    } else if (blob.isCantaloupe && overlapIdx !== -1) {
+      ballDetections[overlapIdx].isCantaloupe = true;
+      if (ballDetections[overlapIdx].score < 0.95) {
+        ballDetections[overlapIdx].score = 0.95;
+      }
     }
   });
   
@@ -489,8 +499,17 @@ async function processFrame(timestamp) {
     state.ballTracker.lastX = bx;
     state.ballTracker.lastY = by;
     state.ballTracker.lostFrames = 0;
+    state.ballTracker.isCantaloupe = !!ball.isCantaloupe;
     
-    activeBall = { x: bx, y: by, w: ball.bbox[2], h: ball.bbox[3], score: ball.score, prediction: false };
+    activeBall = { 
+      x: bx, 
+      y: by, 
+      w: ball.bbox[2], 
+      h: ball.bbox[3], 
+      score: ball.score, 
+      prediction: false,
+      isCantaloupe: !!ball.isCantaloupe
+    };
   } else {
     // If ball is lost, trigger ball memory prediction
     if (state.ballTracker.lastX !== null && state.ballTracker.lostFrames < state.ballTracker.maxMemoryFrames) {
@@ -509,7 +528,8 @@ async function processFrame(timestamp) {
         w: 40, // Standard size
         h: 40,
         score: 0.5,
-        prediction: true // Custom flag to draw a dashed reticle
+        prediction: true, // Custom flag to draw a dashed reticle
+        isCantaloupe: state.ballTracker.isCantaloupe
       };
     } else {
       // Ball fully lost, clear tracker memory
@@ -517,6 +537,7 @@ async function processFrame(timestamp) {
       state.ballTracker.lastY = null;
       state.ballTracker.vx = 0;
       state.ballTracker.vy = 0;
+      state.ballTracker.isCantaloupe = false;
     }
   }
 
@@ -759,8 +780,10 @@ async function processFrame(timestamp) {
 
       // Draw active possession ring under the player's feet (NBA style!)
       if (isHolder) {
-        state.ctx.fillStyle = 'rgba(255, 85, 0, 0.25)';
-        state.ctx.strokeStyle = '#ff5500';
+        const ringStroke = activeBall.isCantaloupe ? '#00ff66' : '#ff5500';
+        const ringFill = activeBall.isCantaloupe ? 'rgba(0, 255, 102, 0.25)' : 'rgba(255, 85, 0, 0.25)';
+        state.ctx.fillStyle = ringFill;
+        state.ctx.strokeStyle = ringStroke;
         state.ctx.lineWidth = 3;
         state.ctx.beginPath();
         state.ctx.ellipse(px + pw / 2, py + ph, pw * 0.4, 8, 0, 0, Math.PI * 2);
@@ -768,16 +791,18 @@ async function processFrame(timestamp) {
         state.ctx.stroke();
       }
 
-      // Draw futuristic glass-border player box (orange for holder, cyan for other players)
-      state.ctx.strokeStyle = isHolder ? '#ff5500' : '#00f0ff';
+      // Draw futuristic glass-border player box (orange/green for holder, cyan for other players)
+      const holderColor = activeBall.isCantaloupe ? '#00ff66' : '#ff5500';
+      state.ctx.strokeStyle = isHolder ? holderColor : '#00f0ff';
       state.ctx.lineWidth = isHolder ? 3 : 2;
       state.ctx.strokeRect(px, py, pw, ph);
 
       // Box corners accents
-      drawCornerBrackets(state.ctx, px, py, pw, ph, 10, isHolder ? '#ff5500' : '#00f0ff');
+      drawCornerBrackets(state.ctx, px, py, pw, ph, 10, isHolder ? holderColor : '#00f0ff');
 
       // Label background card
-      state.ctx.fillStyle = isHolder ? 'rgba(255, 85, 0, 0.85)' : 'rgba(10, 11, 14, 0.7)';
+      const labelBg = isHolder ? (activeBall.isCantaloupe ? 'rgba(0, 200, 80, 0.85)' : 'rgba(255, 85, 0, 0.85)') : 'rgba(10, 11, 14, 0.7)';
+      state.ctx.fillStyle = labelBg;
       state.ctx.fillRect(px, py - 20, Math.max(90, pw * 0.5), 20);
       
       // Label text
@@ -786,7 +811,7 @@ async function processFrame(timestamp) {
       state.ctx.fillText(isHolder ? `POSSESSION ${Math.round(p.score*100)}%` : `PLAYER ${Math.round(p.score*100)}%`, px + 6, py - 6);
     });
 
-    // Draw sports ball neon orange lock-on HUD reticle
+    // Draw sports ball neon orange lock-on HUD reticle (or neon green for cantaloupe!)
     if (activeBall) {
       const bx = (activeBall.x - cropLeft) * scaleX;
       const by = (activeBall.y - cropTop) * scaleY;
@@ -794,8 +819,23 @@ async function processFrame(timestamp) {
       const bh = activeBall.h * scaleY;
       const radius = Math.max(16, (bw + bh) / 4);
 
+      // Determine reticle aesthetics dynamically based on target type
+      let strokeColor = '#ff5500';
+      let labelColor = '#ff3b30';
+      let labelText = 'BALL LOCKED';
+
+      if (activeBall.isCantaloupe) {
+        strokeColor = '#00ff66';
+        labelColor = '#00ff66';
+        labelText = 'CANTALOUPE LOCKED';
+      } else if (activeBall.prediction) {
+        strokeColor = '#ff7b00';
+        labelColor = '#ff7b00';
+        labelText = 'PREDICTED LOCK';
+      }
+
       // Neon glowing lock circular dial
-      state.ctx.strokeStyle = activeBall.prediction ? '#ff7b00' : '#ff5500';
+      state.ctx.strokeStyle = strokeColor;
       state.ctx.lineWidth = 3;
       state.ctx.setLineDash(activeBall.prediction ? [4, 4] : []);
       
@@ -817,11 +857,11 @@ async function processFrame(timestamp) {
       state.ctx.stroke();
 
       // Tracking state label
-      state.ctx.fillStyle = activeBall.prediction ? '#ff7b00' : '#ff3b30';
+      state.ctx.fillStyle = labelColor;
       state.ctx.font = "bold 9px 'Outfit', sans-serif";
       state.ctx.textAlign = 'center';
       state.ctx.fillText(
-        activeBall.prediction ? 'PREDICTED LOCK' : 'BALL LOCKED',
+        labelText,
         bx,
         by - radius - 18
       );
@@ -940,6 +980,7 @@ function detectCircularShapes(videoEl, videoW, videoH) {
         if (pixels.length >= 10 && pixels.length <= 120) {
           let minX = sw, maxX = 0, minY = sh, maxY = 0;
           let sumX = 0, sumY = 0;
+          let totalR = 0, totalG = 0, totalB = 0;
           
           for (let p of pixels) {
             if (p.x < minX) minX = p.x;
@@ -948,7 +989,20 @@ function detectCircularShapes(videoEl, videoW, videoH) {
             if (p.y > maxY) maxY = p.y;
             sumX += p.x;
             sumY += p.y;
+            
+            // Get pixel color from raw data (160x90 canvas)
+            const idx = (p.y * sw + p.x) * 4;
+            totalR += data[idx];
+            totalG += data[idx+1];
+            totalB += data[idx+2];
           }
+          
+          const avgR = totalR / pixels.length;
+          const avgG = totalG / pixels.length;
+          const avgB = totalB / pixels.length;
+          
+          // Green cantaloupe check: Green channel is dominant
+          const isGreenCantaloupe = avgG > avgR * 1.04 && avgG > avgB * 1.04;
           
           const centerX = sumX / pixels.length;
           const centerY = sumY / pixels.length;
@@ -956,8 +1010,12 @@ function detectCircularShapes(videoEl, videoW, videoH) {
           const bh = maxY - minY + 1;
           const aspect = bw / bh;
           
-          // Ball must be relatively compact (aspect ratio close to 1.0)
-          if (aspect >= 0.75 && aspect <= 1.35 && bw >= 4 && bh >= 4) {
+          // Dynamically adjust shape constraints for the ovoid cantaloupe shape
+          const minAspect = isGreenCantaloupe ? 0.60 : 0.75;
+          const maxAspect = isGreenCantaloupe ? 1.60 : 1.35;
+          const maxCircularity = isGreenCantaloupe ? 0.38 : 0.25;
+          
+          if (aspect >= minAspect && aspect <= maxAspect && bw >= 4 && bh >= 4) {
             // Circularity check: variance of boundary pixels' distances to centroid
             let totalDist = 0;
             const distances = [];
@@ -975,8 +1033,8 @@ function detectCircularShapes(videoEl, videoW, videoH) {
             const stdDev = Math.sqrt(variance / pixels.length);
             const circularityScore = stdDev / avgDist;
             
-            // Low radius variance (stdDev/mean) indicates a clean circle or sphere!
-            if (circularityScore < 0.25) {
+            // Low radius variance indicates a clean circle/sphere (or relaxed bounds for cantaloupes!)
+            if (circularityScore < maxCircularity) {
               const scaleX = videoW / sw;
               const scaleY = videoH / sh;
               
@@ -988,7 +1046,8 @@ function detectCircularShapes(videoEl, videoW, videoH) {
                   bh * scaleY
                 ],
                 class: 'sports ball',
-                score: parseFloat((0.90 * (1.0 - circularityScore)).toFixed(2))
+                score: isGreenCantaloupe ? 0.95 : parseFloat((0.90 * (1.0 - circularityScore)).toFixed(2)),
+                isCantaloupe: isGreenCantaloupe
               });
             }
           }
