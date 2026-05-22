@@ -43,6 +43,38 @@
         <h1>ANTIGRAVITY <span class="accent-text">TRACKER</span></h1>
       </div>
       
+      <div class="hud-top-settings">
+        <!-- Quick Resolution -->
+        <div class="hud-select-wrapper">
+          <select id="quickResolution" title="Select Video Resolution">
+            <option value="720p">720p (Max Performance)</option>
+            <option value="1080p">1080p (Full HD Detail)</option>
+          </select>
+        </div>
+
+        <!-- Quick Profile -->
+        <div class="hud-select-wrapper">
+          <select id="quickProfile" title="Select Tracking Profile">
+            <option value="combined">Combined (Smart)</option>
+            <option value="player_with_ball" selected>Player with Ball</option>
+            <option value="ball">Ball Centered</option>
+            <option value="players">Players Only</option>
+          </select>
+        </div>
+
+        <!-- Quick Zoom -->
+        <div class="hud-select-wrapper">
+          <select id="quickZoom" title="Select Maximum Zoom">
+            <option value="1.0">1.0x Zoom (Wide)</option>
+            <option value="1.5">1.5x Zoom</option>
+            <option value="2.0">2.0x Zoom</option>
+            <option value="2.2" selected>2.2x Zoom (Default)</option>
+            <option value="2.5">2.5x Zoom</option>
+            <option value="3.0">3.0x Zoom (Tight)</option>
+          </select>
+        </div>
+      </div>
+      
       <div class="telemetry-bar">
         <div class="telemetry-item" id="aiStatus">
           <span class="label">AI Engine:</span>
@@ -120,9 +152,12 @@
 
         <div class="control-group">
           <label>Tracking Profile</label>
-          <div class="toggle-segmented">
-            <input type="radio" id="modeCombined" name="trackingMode" value="combined" checked>
-            <label for="modeCombined">Combined (Smart)</label>
+          <div class="toggle-segmented flex-wrap">
+            <input type="radio" id="modeCombined" name="trackingMode" value="combined">
+            <label for="modeCombined">Smart Combined</label>
+
+            <input type="radio" id="modePlayerWithBall" name="trackingMode" value="player_with_ball" checked>
+            <label for="modePlayerWithBall">Player with Ball</label>
 
             <input type="radio" id="modeBall" name="trackingMode" value="ball">
             <label for="modeBall">Ball Centered</label>

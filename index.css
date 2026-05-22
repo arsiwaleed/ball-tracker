@@ -117,6 +117,58 @@ html, body {
   color: var(--accent-gold);
 }
 
+.hud-top-settings {
+  display: flex;
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.hud-select-wrapper {
+  position: relative;
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-glass);
+  border-radius: 20px;
+  padding: 6px 12px;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  align-items: center;
+  transition: all 0.3s ease;
+}
+
+.hud-select-wrapper:focus-within {
+  border-color: var(--accent-gold);
+  box-shadow: var(--shadow-glow-gold);
+}
+
+.hud-select-wrapper select {
+  background: transparent;
+  border: none;
+  color: #ffffff;
+  font-family: var(--font-display);
+  font-size: 0.78rem;
+  font-weight: 700;
+  appearance: none;
+  outline: none;
+  cursor: pointer;
+  padding-right: 16px;
+}
+
+.hud-select-wrapper::after {
+  content: '▼';
+  font-size: 0.55rem;
+  color: var(--accent-gold);
+  position: absolute;
+  right: 12px;
+  pointer-events: none;
+}
+
+.flex-wrap {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
 .telemetry-bar {
   display: flex;
   gap: 16px;

@@ -21,6 +21,7 @@ const state = {
   ctx: null,
   stream: null,
   activeCamera: 'environment', // 'environment' (back) or 'user' (front)
+  activeResolution: '720p',    // '720p' or '1080p'
   videoWidth: 1280,
   videoHeight: 720,
 
@@ -37,7 +38,7 @@ const state = {
     panLerp: 0.05,
     zoomLerp: 0.03,
     maxZoom: 2.2,
-    mode: 'combined', // 'combined', 'ball', 'players'
+    mode: 'player_with_ball', // Default to action-oriented Player with Ball tracking!
   },
 
   // Ball Memory / Tracking Prediction System
@@ -48,6 +49,14 @@ const state = {
     vy: 0,
     lostFrames: 0,
     maxMemoryFrames: 15, // Track occluded ball for 0.5s at 30FPS
+  },
+
+  // Possession & Action Tracking
+  possession: {
+    holder: null,        // Bounding box of the player currently holding the ball
+    lastHolder: null,    // Coords/box of the last player who had the ball
+    isBallInAir: false,  // Whether the ball is currently in the air (pass/shot)
+    airTime: 0,          // Duration ball has been in the air
   },
 
   // Recording State
@@ -88,6 +97,9 @@ const DOM = {
   throttleSlider: () => document.getElementById('throttleSlider'),
   throttleVal: () => document.getElementById('throttleVal'),
   toastContainer: () => document.getElementById('toastContainer'),
+  quickResolution: () => document.getElementById('quickResolution'),
+  quickProfile: () => document.getElementById('quickProfile'),
+  quickZoom: () => document.getElementById('quickZoom'),
 };
 
 // Initialize Application on Window Load
@@ -185,13 +197,16 @@ async function setupCamera() {
     state.stream.getTracks().forEach(track => track.stop());
   }
 
-  // Mobile back-facing camera constraints
+  const is1080 = state.activeResolution === '1080p';
+  console.log(`[Camera] Requesting camera constraints for resolution: ${state.activeResolution} (${is1080 ? '1920x1080' : '1280x720'})`);
+
+  // Mobile camera constraints
   const constraints = {
     audio: true, // Captures court sounds/screams for high quality videos!
     video: {
       facingMode: state.activeCamera === 'environment' ? 'environment' : 'user',
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
+      width: { ideal: is1080 ? 1920 : 1280 },
+      height: { ideal: is1080 ? 1080 : 720 },
       frameRate: { ideal: 30 }
     }
   };
@@ -222,14 +237,43 @@ async function setupCamera() {
     });
 
     console.log(`[Camera] Started raw feed: ${state.videoWidth}x${state.videoHeight}`);
+    showToast(`Resolution switched to ${state.videoWidth}x${state.videoHeight}`, 'success');
   } catch (error) {
     console.error('[Camera] Access denied or unavailable:', error);
-    showToast('Camera access blocked. Please grant permissions and reload.', 'error');
+    showToast('Failed to switch resolution. Using fallback camera stream.', 'error');
   }
 }
 
 // 6. UI Event Triggers
 function setupEventListeners() {
+  // Quick resolution selector in the header
+  DOM.quickResolution().addEventListener('change', async (e) => {
+    state.activeResolution = e.target.value;
+    await setupCamera();
+  });
+
+  // Quick tracking profile selector in the header
+  DOM.quickProfile().addEventListener('change', (e) => {
+    state.viewport.mode = e.target.value;
+    
+    // Synchronize settings drawer radio buttons
+    const radio = document.querySelector(`input[name="trackingMode"][value="${e.target.value}"]`);
+    if (radio) radio.checked = true;
+    
+    showToast(`Tracking Profile: ${e.target.value.toUpperCase().replace(/_/g, ' ')}`, 'info');
+  });
+
+  // Quick zoom selector in the header
+  DOM.quickZoom().addEventListener('change', (e) => {
+    state.viewport.maxZoom = parseFloat(e.target.value);
+    
+    // Synchronize slider and text value in the settings drawer
+    DOM.zoomSlider().value = state.viewport.maxZoom;
+    DOM.zoomVal().textContent = state.viewport.maxZoom.toFixed(1) + 'x';
+    
+    showToast(`Max Zoom: ${state.viewport.maxZoom.toFixed(1)}x`, 'info');
+  });
+
   // Flip Camera
   DOM.flipCameraBtn().addEventListener('click', async () => {
     state.activeCamera = state.activeCamera === 'environment' ? 'user' : 'environment';
@@ -294,6 +338,12 @@ function setupEventListeners() {
   DOM.zoomSlider().addEventListener('input', (e) => {
     state.viewport.maxZoom = parseFloat(e.target.value);
     DOM.zoomVal().textContent = state.viewport.maxZoom.toFixed(1) + 'x';
+    
+    // Synchronize quick zoom selector on top-right HUD
+    const val = state.viewport.maxZoom;
+    const options = Array.from(DOM.quickZoom().options).map(opt => parseFloat(opt.value));
+    const closest = options.reduce((prev, curr) => Math.abs(curr - val) < Math.abs(prev - val) ? curr : prev);
+    DOM.quickZoom().value = closest.toFixed(1);
   });
 
   DOM.throttleSlider().addEventListener('input', (e) => {
@@ -309,7 +359,11 @@ function setupEventListeners() {
   modeRadios.forEach(radio => {
     radio.addEventListener('change', (e) => {
       state.viewport.mode = e.target.value;
-      showToast(`Tracking Profile: ${e.target.value.toUpperCase()}`, 'info');
+      
+      // Synchronize quick header dropdown select
+      DOM.quickProfile().value = e.target.value;
+      
+      showToast(`Tracking Profile: ${e.target.value.toUpperCase().replace(/_/g, ' ')}`, 'info');
     });
   });
 
@@ -411,6 +465,67 @@ async function processFrame(timestamp) {
     }
   }
 
+  // 2.5 EXECUTE PLAYER POSSESSION DETECTION HEURISTIC
+  let ballHolder = null;
+  
+  if (activeBall) {
+    let minDistance = Infinity;
+    playerDetections.forEach(p => {
+      const px = p.bbox[0];
+      const py = p.bbox[1];
+      const pw = p.bbox[2];
+      const ph = p.bbox[3];
+      
+      // Possession overlap: Pad horizontally by 15% and vertically by 10%
+      const padW = pw * 0.15;
+      const padH = ph * 0.10;
+      
+      const bx = activeBall.x;
+      const by = activeBall.y;
+      
+      if (bx >= px - padW && bx <= px + pw + padW &&
+          by >= py - padH && by <= py + ph + padH) {
+        
+        const pCenterX = px + pw / 2;
+        const pCenterY = py + ph / 2;
+        const dist = Math.hypot(pCenterX - bx, pCenterY - by);
+        
+        if (dist < minDistance) {
+          minDistance = dist;
+          ballHolder = p;
+        }
+      }
+    });
+    
+    if (ballHolder) {
+      state.possession.holder = ballHolder;
+      state.possession.lastHolder = {
+        x: ballHolder.bbox[0] + ballHolder.bbox[2] / 2,
+        y: ballHolder.bbox[1] + ballHolder.bbox[3] / 2,
+        w: ballHolder.bbox[2],
+        h: ballHolder.bbox[3],
+        timestamp: Date.now()
+      };
+      state.possession.isBallInAir = false;
+      state.possession.airTime = 0;
+    } else {
+      // Ball is detected, but no player is holding it (it is in the air!)
+      state.possession.holder = null;
+      state.possession.isBallInAir = true;
+      state.possession.airTime++;
+    }
+  } else {
+    // Ball is lost. If it was in the air, let it stay in the air for up to 30 frames (1s) of tracking memory
+    state.possession.holder = null;
+    if (state.possession.isBallInAir) {
+      state.possession.airTime++;
+      if (state.possession.airTime > 30) {
+        state.possession.isBallInAir = false;
+        state.possession.airTime = 0;
+      }
+    }
+  }
+
   // 3. CENTER STAGE MATH - COMPUTE TARGET VIEWPORT
   const aspect = state.canvasEl.width / state.canvasEl.height;
   
@@ -445,6 +560,38 @@ async function processFrame(timestamp) {
     let minW = state.videoWidth / state.viewport.maxZoom;
     targetW = Math.max(spread * 1.3, minW);
   } 
+  else if (mode === 'player_with_ball') {
+    // Track player currently holding the ball. Zoom out during passes/shots!
+    if (ballHolder) {
+      // Focus strictly on the player holding the ball (tight zoom!)
+      targetX = ballHolder.bbox[0] + ballHolder.bbox[2] / 2;
+      targetY = ballHolder.bbox[1] + ballHolder.bbox[3] / 2;
+      targetW = state.videoWidth / state.viewport.maxZoom; // Crop closely
+    } else if (activeBall && state.possession.isBallInAir) {
+      // Ball is in the air (pass/shot). Zoom out to capture flight path & receiver!
+      targetX = activeBall.x;
+      targetY = activeBall.y;
+      
+      // Dynamic zoom out: set viewport to 1.25x zoom for cinematic court capture
+      targetW = state.videoWidth / 1.25;
+      
+      // Frame the pass: bias center slightly towards the pass origin (last holder) so both are in frame
+      if (state.possession.lastHolder && (Date.now() - state.possession.lastHolder.timestamp < 1500)) {
+        targetX = activeBall.x * 0.7 + state.possession.lastHolder.x * 0.3;
+        targetY = activeBall.y * 0.7 + state.possession.lastHolder.y * 0.3;
+      }
+    } else if (playerDetections.length > 0) {
+      // Fallback: track center of players
+      let sumX = 0, sumY = 0;
+      playerDetections.forEach(p => {
+        sumX += p.bbox[0] + p.bbox[2]/2;
+        sumY += p.bbox[1] + p.bbox[3]/2;
+      });
+      targetX = sumX / playerDetections.length;
+      targetY = sumY / playerDetections.length;
+      targetW = state.videoWidth / 1.5; // Intermediate zoom
+    }
+  }
   else if (mode === 'combined') {
     // Dynamic combined mode (Smart Camera)
     if (activeBall) {
@@ -474,10 +621,20 @@ async function processFrame(timestamp) {
         let minX = Math.min(activeBall.x, ...nearbyPlayers.map(p => p.bbox[0]));
         let maxX = Math.max(activeBall.x, ...nearbyPlayers.map(p => p.bbox[0] + p.bbox[2]));
         let minW = state.videoWidth / state.viewport.maxZoom;
-        targetW = Math.max((maxX - minX) * 1.5, minW);
+        
+        // If ball is in the air, force a wider crop to capture pass dynamics
+        if (state.possession.isBallInAir) {
+          targetW = Math.max((maxX - minX) * 1.5, state.videoWidth / 1.25);
+        } else {
+          targetW = Math.max((maxX - minX) * 1.5, minW);
+        }
       } else {
-        // Just ball, zoom in
-        targetW = state.videoWidth / state.viewport.maxZoom;
+        // Just ball, zoom in or out based on air status
+        if (state.possession.isBallInAir) {
+          targetW = state.videoWidth / 1.25;
+        } else {
+          targetW = state.videoWidth / state.viewport.maxZoom;
+        }
       }
     } else if (playerDetections.length > 0) {
       // Fallback to tracking player center
@@ -530,28 +687,44 @@ async function processFrame(timestamp) {
 
     // Draw active player bounding boxes (holographic cyan overlay)
     playerDetections.forEach(p => {
+      // Check if this player is currently the ball holder
+      const isHolder = ballHolder &&
+                       Math.abs(p.bbox[0] - ballHolder.bbox[0]) < 1 &&
+                       Math.abs(p.bbox[1] - ballHolder.bbox[1]) < 1;
+
       // Translate coordinates from raw feed coordinates to local canvas crop coordinates
       const px = (p.bbox[0] - cropLeft) * scaleX;
       const py = (p.bbox[1] - cropTop) * scaleY;
       const pw = p.bbox[2] * scaleX;
       const ph = p.bbox[3] * scaleY;
 
-      // Draw futuristic glass-border player box
-      state.ctx.strokeStyle = '#00f0ff';
-      state.ctx.lineWidth = 2;
+      // Draw active possession ring under the player's feet (NBA style!)
+      if (isHolder) {
+        state.ctx.fillStyle = 'rgba(255, 85, 0, 0.25)';
+        state.ctx.strokeStyle = '#ff5500';
+        state.ctx.lineWidth = 3;
+        state.ctx.beginPath();
+        state.ctx.ellipse(px + pw / 2, py + ph, pw * 0.4, 8, 0, 0, Math.PI * 2);
+        state.ctx.fill();
+        state.ctx.stroke();
+      }
+
+      // Draw futuristic glass-border player box (orange for holder, cyan for other players)
+      state.ctx.strokeStyle = isHolder ? '#ff5500' : '#00f0ff';
+      state.ctx.lineWidth = isHolder ? 3 : 2;
       state.ctx.strokeRect(px, py, pw, ph);
 
       // Box corners accents
-      drawCornerBrackets(state.ctx, px, py, pw, ph, 10, '#00f0ff');
+      drawCornerBrackets(state.ctx, px, py, pw, ph, 10, isHolder ? '#ff5500' : '#00f0ff');
 
       // Label background card
-      state.ctx.fillStyle = 'rgba(10, 11, 14, 0.7)';
-      state.ctx.fillRect(px, py - 20, Math.max(80, pw * 0.5), 20);
+      state.ctx.fillStyle = isHolder ? 'rgba(255, 85, 0, 0.85)' : 'rgba(10, 11, 14, 0.7)';
+      state.ctx.fillRect(px, py - 20, Math.max(90, pw * 0.5), 20);
       
       // Label text
       state.ctx.fillStyle = '#ffffff';
       state.ctx.font = "bold 10px 'Inter', sans-serif";
-      state.ctx.fillText(`PLAYER ${Math.round(p.score*100)}%`, px + 6, py - 6);
+      state.ctx.fillText(isHolder ? `POSSESSION ${Math.round(p.score*100)}%` : `PLAYER ${Math.round(p.score*100)}%`, px + 6, py - 6);
     });
 
     // Draw sports ball neon orange lock-on HUD reticle
