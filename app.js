@@ -381,6 +381,12 @@ function setupEventListeners() {
 async function processFrame(timestamp) {
   state.frameCount++;
 
+  // Guard against temporary zero-dimensions during camera transitions/loading
+  if (!state.videoWidth || !state.videoHeight || state.videoWidth <= 0 || state.videoHeight <= 0) {
+    requestAnimationFrame(processFrame);
+    return;
+  }
+
   // Update real FPS telemetry
   if (!state.lastFpsUpdate) state.lastFpsUpdate = timestamp;
   state.fpsFrames++;
