@@ -465,11 +465,25 @@ async function processFrame(timestamp) {
     });
     
     if (!hasOverlap) {
-      ballDetections.push(blob);
+      // Deduplicate overlapping blobs within ballDetections (Edge vs Color channels)
+      const existingIdx = ballDetections.findIndex(existing => {
+        const ex = existing.bbox[0];
+        const ey = existing.bbox[1];
+        const ew = existing.bbox[2];
+        const eh = existing.bbox[3];
+        return bx >= ex && bx <= ex + ew && by >= ey && by <= ey + eh;
+      });
+      
+      if (existingIdx === -1) {
+        ballDetections.push(blob);
+      } else if (blob.isCantaloupe) {
+        ballDetections[existingIdx].isCantaloupe = true;
+        ballDetections[existingIdx].score = Math.max(ballDetections[existingIdx].score, blob.score);
+      }
     } else if (blob.isCantaloupe && overlapIdx !== -1) {
       ballDetections[overlapIdx].isCantaloupe = true;
-      if (ballDetections[overlapIdx].score < 0.95) {
-        ballDetections[overlapIdx].score = 0.95;
+      if (ballDetections[overlapIdx].score < 0.98) {
+        ballDetections[overlapIdx].score = 0.98;
       }
     }
   });
@@ -925,13 +939,31 @@ function detectCircularShapes(videoEl, videoW, videoH) {
   const data = imgData.data;
   const grayscale = new Float32Array(sw * sh);
   
-  // 1. Convert to Grayscale
+  // 1. Convert to Grayscale & generate Cantaloupe Color Mask (pale yellowish-green / beige)
+  const cantaloupeMask = new Uint8Array(sw * sh);
+  
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i];
     const g = data[i+1];
     const b = data[i+2];
-    grayscale[i/4] = 0.299 * r + 0.587 * g + 0.114 * b;
+    const idx = i / 4;
+    grayscale[idx] = 0.299 * r + 0.587 * g + 0.114 * b;
+    
+    // Cantaloupe color check: pale yellowish-tan/green rind
+    const brightness = r + g + b;
+    if (brightness >= 100 && brightness <= 650) {
+      // Both R and G should be significantly higher than B to filter out grey/white backgrounds
+      if (r >= b * 1.12 && g >= b * 1.12) {
+        // Red and green must be closely balanced (excludes pink skin and pure green)
+        const rgRatio = r / (g + 0.1);
+        if (rgRatio >= 0.70 && rgRatio <= 1.40) {
+          cantaloupeMask[idx] = 255;
+        }
+      }
+    }
   }
+  
+  const blobs = [];
   
   // 2. Simple Sobel gradient magnitude for fast edge detection
   const edges = new Uint8Array(sw * sh);
@@ -947,16 +979,17 @@ function detectCircularShapes(videoEl, videoW, videoH) {
     }
   }
   
-  // 3. Fast Connected Components BFS to find circular contours
-  const visited = new Uint8Array(sw * sh);
-  const blobs = [];
+  // ==========================================
+  // CHANNEL A: Sobel Edge-Based Circular BFS
+  // ==========================================
+  const edgeVisited = new Uint8Array(sw * sh);
   
   for (let y = 2; y < sh - 2; y++) {
     for (let x = 2; x < sw - 2; x++) {
       const idx = y * sw + x;
-      if (edges[idx] && !visited[idx]) {
+      if (edges[idx] && !edgeVisited[idx]) {
         const queue = [idx];
-        visited[idx] = 1;
+        edgeVisited[idx] = 1;
         const pixels = [];
         let head = 0;
         
@@ -968,15 +1001,14 @@ function detectCircularShapes(videoEl, videoW, videoH) {
           
           const neighbors = [curr - 1, curr + 1, curr - sw, curr + sw];
           for (let n of neighbors) {
-            if (n >= 0 && n < sw * sh && edges[n] && !visited[n]) {
-              visited[n] = 1;
+            if (n >= 0 && n < sw * sh && edges[n] && !edgeVisited[n]) {
+              edgeVisited[n] = 1;
               queue.push(n);
             }
           }
-          if (queue.length > 250) break; // Limit size to filter out large court lines/backgrounds
+          if (queue.length > 250) break;
         }
         
-        // Basketball/sports balls will be medium-sized blobs in our 160x90 thumbnail
         if (pixels.length >= 10 && pixels.length <= 120) {
           let minX = sw, maxX = 0, minY = sh, maxY = 0;
           let sumX = 0, sumY = 0;
@@ -990,7 +1022,6 @@ function detectCircularShapes(videoEl, videoW, videoH) {
             sumX += p.x;
             sumY += p.y;
             
-            // Get pixel color from raw data (160x90 canvas)
             const idx = (p.y * sw + p.x) * 4;
             totalR += data[idx];
             totalG += data[idx+1];
@@ -1001,7 +1032,6 @@ function detectCircularShapes(videoEl, videoW, videoH) {
           const avgG = totalG / pixels.length;
           const avgB = totalB / pixels.length;
           
-          // Green cantaloupe check: Green channel is dominant
           const isGreenCantaloupe = avgG > avgR * 1.04 && avgG > avgB * 1.04;
           
           const centerX = sumX / pixels.length;
@@ -1010,13 +1040,11 @@ function detectCircularShapes(videoEl, videoW, videoH) {
           const bh = maxY - minY + 1;
           const aspect = bw / bh;
           
-          // Dynamically adjust shape constraints for the ovoid cantaloupe shape
           const minAspect = isGreenCantaloupe ? 0.60 : 0.75;
           const maxAspect = isGreenCantaloupe ? 1.60 : 1.35;
           const maxCircularity = isGreenCantaloupe ? 0.38 : 0.25;
           
           if (aspect >= minAspect && aspect <= maxAspect && bw >= 4 && bh >= 4) {
-            // Circularity check: variance of boundary pixels' distances to centroid
             let totalDist = 0;
             const distances = [];
             for (let p of pixels) {
@@ -1033,7 +1061,6 @@ function detectCircularShapes(videoEl, videoW, videoH) {
             const stdDev = Math.sqrt(variance / pixels.length);
             const circularityScore = stdDev / avgDist;
             
-            // Low radius variance indicates a clean circle/sphere (or relaxed bounds for cantaloupes!)
             if (circularityScore < maxCircularity) {
               const scaleX = videoW / sw;
               const scaleY = videoH / sh;
@@ -1048,6 +1075,96 @@ function detectCircularShapes(videoEl, videoW, videoH) {
                 class: 'sports ball',
                 score: isGreenCantaloupe ? 0.95 : parseFloat((0.90 * (1.0 - circularityScore)).toFixed(2)),
                 isCantaloupe: isGreenCantaloupe
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  // ===================================================
+  // CHANNEL B: Cantaloupe-Color-Mask Connected BFS
+  // ===================================================
+  const colorVisited = new Uint8Array(sw * sh);
+  
+  for (let y = 2; y < sh - 2; y++) {
+    for (let x = 2; x < sw - 2; x++) {
+      const idx = y * sw + x;
+      if (cantaloupeMask[idx] && !colorVisited[idx]) {
+        const queue = [idx];
+        colorVisited[idx] = 1;
+        const pixels = [];
+        let head = 0;
+        
+        while (head < queue.length) {
+          const curr = queue[head++];
+          const cx = curr % sw;
+          const cy = Math.floor(curr / sw);
+          pixels.push({ x: cx, y: cy });
+          
+          const neighbors = [curr - 1, curr + 1, curr - sw, curr + sw];
+          for (let n of neighbors) {
+            if (n >= 0 && n < sw * sh && cantaloupeMask[n] && !colorVisited[n]) {
+              colorVisited[n] = 1;
+              queue.push(n);
+            }
+          }
+          if (queue.length > 250) break;
+        }
+        
+        // Cantaloupe should be a medium-sized cluster
+        if (pixels.length >= 8 && pixels.length <= 150) {
+          let minX = sw, maxX = 0, minY = sh, maxY = 0;
+          let sumX = 0, sumY = 0;
+          for (let p of pixels) {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+            sumX += p.x;
+            sumY += p.y;
+          }
+          
+          const centerX = sumX / pixels.length;
+          const centerY = sumY / pixels.length;
+          const bw = maxX - minX + 1;
+          const bh = maxY - minY + 1;
+          const aspect = bw / bh;
+          
+          // Highly relaxed ovoid constraints (aspect ratio between 0.55 and 1.65)
+          if (aspect >= 0.55 && aspect <= 1.65 && bw >= 3 && bh >= 3) {
+            let totalDist = 0;
+            const distances = [];
+            for (let p of pixels) {
+              const d = Math.hypot(p.x - centerX, p.y - centerY);
+              distances.push(d);
+              totalDist += d;
+            }
+            
+            const avgDist = totalDist / pixels.length;
+            let variance = 0;
+            for (let d of distances) {
+              variance += Math.pow(d - avgDist, 2);
+            }
+            const stdDev = Math.sqrt(variance / pixels.length);
+            const circularityScore = stdDev / avgDist;
+            
+            // Allow natural round shape variance up to 0.40
+            if (circularityScore < 0.40) {
+              const scaleX = videoW / sw;
+              const scaleY = videoH / sh;
+              
+              blobs.push({
+                bbox: [
+                  minX * scaleX,
+                  minY * scaleY,
+                  bw * scaleX,
+                  bh * scaleY
+                ],
+                class: 'sports ball',
+                score: 0.98, // High confidence since color is perfectly matched
+                isCantaloupe: true
               });
             }
           }
